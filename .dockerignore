@@ -1,0 +1,16 @@
+# Keep the Docker build context small and avoid leaking host build artifacts
+# into images (this repo is COPY'd into several Dockerfiles under docker/).
+.git
+build/
+install/
+log/
+**/build/
+**/install/
+**/log/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.settings
+.pydevproject
+.vscode/

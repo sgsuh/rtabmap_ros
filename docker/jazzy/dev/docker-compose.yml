@@ -1,0 +1,59 @@
+# ROS 2 Jazzy development environment for rtabmap_ros.
+#
+#   cd docker/jazzy/dev
+#   docker compose build          # build the image (installs rosdep deps)
+#   docker compose up -d          # start the container in the background
+#   docker compose exec dev bash  # get a shell; source is at src/rtabmap_ros
+#
+# Inside the shell, build the workspace:
+#   colcon build --symlink-install --cmake-args -DRTABMAP_SYNC_MULTI_RGBD=ON -DCMAKE_BUILD_TYPE=Release
+#
+services:
+  dev:
+    build:
+      # Build context is the repo root so the Dockerfile can COPY the source for rosdep.
+      context: ../../..
+      dockerfile: docker/jazzy/dev/Dockerfile
+    image: rtabmap_ros:jazzy-dev
+    container_name: rtabmap_jazzy_dev
+
+    # host networking makes ROS 2 / DDS discovery painless (also lets GUIs reach the display).
+    network_mode: host
+    ipc: host
+
+    # NVIDIA GPU access (RTX 4070). Requires nvidia-container-toolkit on the host,
+    # which is already configured. Remove this block to run CPU-only.
+    gpus: all
+
+    environment:
+      # WSLg / X11 forwarding for GUIs (rtabmap_viz, rviz2).
+      DISPLAY: ${DISPLAY:-:0}
+      QT_X11_NO_MITSHM: "1"
+      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-}
+      XDG_RUNTIME_DIR: ${XDG_RUNTIME_DIR:-}
+      PULSE_SERVER: ${PULSE_SERVER:-}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+
+    volumes:
+      # Live source bind-mount: edits on the host are built inside the container.
+      - ../../..:/root/ros2_ws/src/rtabmap_ros:rw
+      # Datasets / rosbags from the host (read-only), e.g. ~/data/demo_mapping_bag.
+      - ${HOME}/data:/root/data:ro
+      # Persist the colcon build/install/log across container restarts.
+      - rtabmap_ws:/root/ros2_ws/build
+      - rtabmap_ws_install:/root/ros2_ws/install
+      - rtabmap_ws_log:/root/ros2_ws/log
+      # X11 / WSLg sockets for GUI apps.
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /mnt/wslg:/mnt/wslg:rw
+
+    # Keep the container alive so you can `exec` into it repeatedly.
+    command: ["sleep", "infinity"]
+    stdin_open: true
+    tty: true
+
+volumes:
+  rtabmap_ws:
+  rtabmap_ws_install:
+  rtabmap_ws_log:
