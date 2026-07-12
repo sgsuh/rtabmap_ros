@@ -164,7 +164,7 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 
 	bool publishTf = true;
 	std::string initialPoseStr;
-	tfDelay = 0.05; // 20 Hz
+	tfPublishPeriod = 0.05; // 20 Hz
 	tfTolerance = 0.1; // 100 ms
 	std::string odomFrameIdInit;
 
@@ -197,7 +197,7 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 	ULogger::setEventLevel((ULogger::Level)eventLevel);
 
 	publishTf = this->declare_parameter("publish_tf", publishTf);
-	tfDelay = this->declare_parameter("tf_delay", tfDelay);
+	tfPublishPeriod = this->declare_parameter("tf_publish_period", tfPublishPeriod);
 	tfTolerance = this->declare_parameter("tf_tolerance", tfTolerance);
 
 	odomDefaultAngVariance_ = this->declare_parameter("odom_tf_angular_variance", odomDefaultAngVariance_);
@@ -242,7 +242,7 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 	RCLCPP_INFO(this->get_logger(), "rtabmap: log_to_rosout_level  = %d", eventLevel);
 	RCLCPP_INFO(this->get_logger(), "rtabmap: initial_pose  = \"%s\"", initialPoseStr.c_str());
 	RCLCPP_INFO(this->get_logger(), "rtabmap: use_action_for_goal  = %s", useActionForGoal_?"true":"false");
-	RCLCPP_INFO(this->get_logger(), "rtabmap: tf_delay      = %f", tfDelay);
+	RCLCPP_INFO(this->get_logger(), "rtabmap: tf_publish_period      = %f", tfPublishPeriod);
 	RCLCPP_INFO(this->get_logger(), "rtabmap: tf_tolerance  = %f", tfTolerance);
 	RCLCPP_INFO(this->get_logger(), "rtabmap: odom_sensor_sync   = %s", odomSensorSync_?"true":"false");
 	RCLCPP_INFO(this->get_logger(), "rtabmap: pub_loc_pose_only_when_localizing = %s", pubLocPoseOnlyWhenLocalizing_?"true":"false");
@@ -710,9 +710,9 @@ CoreWrapper::CoreWrapper(const rclcpp::NodeOptions & options) :
 	{
 		tfThreadRunning_ = true;
 		transformThread_ = new std::thread([&](){
-			if(tfDelay == 0)
+			if(tfPublishPeriod == 0)
 				return;
-			rclcpp::Rate r(1.0 / tfDelay);
+			rclcpp::Rate r(1.0 / tfPublishPeriod);
 			while(tfThreadRunning_)
 			{
 				mapToOdomMutex_.lock();

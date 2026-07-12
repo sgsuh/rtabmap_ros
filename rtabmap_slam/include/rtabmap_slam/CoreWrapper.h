@@ -330,7 +330,7 @@ private:
 	std::string configPath_;
 	std::string databasePath_;
 
-	double tfDelay;
+	double tfPublishPeriod;
 	double tfTolerance;
 
 	double odomDefaultAngVariance_;
