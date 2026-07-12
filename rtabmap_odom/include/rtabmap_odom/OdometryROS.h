@@ -126,6 +126,7 @@ private:
 	double guessLinearVariance_;
 	double guessAngularVariance_;
 	bool publishTf_;
+	double tf_tolerance_;
 	double waitForTransform_;
 	bool publishNullWhenLost_;
 	bool publishCompressedSensorData_;

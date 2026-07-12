@@ -79,6 +79,7 @@ OdometryROS::OdometryROS(const std::string & name, const rclcpp::NodeOptions & o
 	guessLinearVariance_(0.001),
 	guessAngularVariance_(0.001),
 	publishTf_(true),
+	tf_tolerance_(0.1),
 	waitForTransform_(0.1), // 100 ms
 	publishNullWhenLost_(true),
 	publishCompressedSensorData_(false),
@@ -133,6 +134,7 @@ OdometryROS::OdometryROS(const std::string & name, const rclcpp::NodeOptions & o
 	frameId_ = this->declare_parameter("frame_id", frameId_);
 	odomFrameId_ = this->declare_parameter("odom_frame_id", odomFrameId_);
 	publishTf_ = this->declare_parameter("publish_tf", publishTf_);
+	tf_tolerance_ = this->declare_parameter("tf_tolerance", tf_tolerance_);
 
 	waitForTransform_ = this->declare_parameter("wait_for_transform", waitForTransform_);
 	initialPoseStr = this->declare_parameter("initial_pose", initialPoseStr); // "x y z roll pitch yaw"
@@ -197,6 +199,7 @@ OdometryROS::OdometryROS(const std::string & name, const rclcpp::NodeOptions & o
 	RCLCPP_INFO(this->get_logger(), "Odometry: frame_id               = %s", frameId_.c_str());
 	RCLCPP_INFO(this->get_logger(), "Odometry: odom_frame_id          = %s", odomFrameId_.c_str());
 	RCLCPP_INFO(this->get_logger(), "Odometry: publish_tf             = %s", publishTf_?"true":"false");
+	RCLCPP_INFO(this->get_logger(), "Odometry: transform_tolerance    = %f", tf_tolerance_);
 	RCLCPP_INFO(this->get_logger(), "Odometry: wait_for_transform     = %f", waitForTransform_);
 	RCLCPP_INFO(this->get_logger(), "Odometry: log_to_rosout_level    = %d", eventLevel);
 	RCLCPP_INFO(this->get_logger(), "Odometry: initial_pose           = %s", initialPose_.prettyPrint().c_str());
@@ -840,7 +843,7 @@ void OdometryROS::processData()
 		geometry_msgs::msg::TransformStamped poseMsg;
 		poseMsg.child_frame_id = frameId_;
 		poseMsg.header.frame_id = odomFrameId_;
-		poseMsg.header.stamp = header.stamp;
+		poseMsg.header.stamp = header.stamp + rclcpp::Duration::from_seconds(tf_tolerance_);
 		rtabmap_conversions::transformToGeometryMsg(pose, poseMsg.transform);
 
 		if(publishTf_)
@@ -851,7 +854,7 @@ void OdometryROS::processData()
 				geometry_msgs::msg::TransformStamped correctionMsg;
 				correctionMsg.child_frame_id = guessFrameId_;
 				correctionMsg.header.frame_id = odomFrameId_;
-				correctionMsg.header.stamp = header.stamp;
+				correctionMsg.header.stamp = header.stamp + rclcpp::Duration::from_seconds(tf_tolerance_);
 				Transform correction = pose * guessCurrentPose.inverse();
 				rtabmap_conversions::transformToGeometryMsg(correction, correctionMsg.transform);
 
@@ -1071,7 +1074,7 @@ void OdometryROS::processData()
 			geometry_msgs::msg::TransformStamped correctionMsg;
 			correctionMsg.child_frame_id = guessFrameId_;
 			correctionMsg.header.frame_id = odomFrameId_;
-			correctionMsg.header.stamp = header.stamp;
+			correctionMsg.header.stamp = header.stamp + rclcpp::Duration::from_seconds(tf_tolerance_);
 			Transform correction = odometry_->getPose() * guess_ * guessCurrentPose.inverse();
 			rtabmap_conversions::transformToGeometryMsg(correction, correctionMsg.transform);
 			double time_now = now().seconds();
