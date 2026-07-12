@@ -29,6 +29,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rclcpp/rclcpp.hpp"
 
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
 
 #include <tf2_ros/buffer.hpp>
 #include <tf2_ros/transform_listener.hpp>
@@ -86,14 +87,25 @@ private:
 	message_filters::Subscriber<sensor_msgs::msg::PointCloud2> cloudSub_3_;
 	message_filters::Subscriber<sensor_msgs::msg::PointCloud2> cloudSub_4_;
 
+	rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr scanPub_;
 	rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloudPub_;
 
 	std::string frameId_;
 	std::string fixedFrameId_;
 	double waitForTransform_;
 	bool xyzOutput_;
+	bool convertToLaserScan_;
 	std::shared_ptr<tf2_ros::Buffer> tfBuffer_;
 	std::shared_ptr<tf2_ros::TransformListener> tfListener_;
+
+	double scanAngleMin_;
+	double scanAngleMax_;
+	double scanAngleIncrement_;
+	double scanRangeMin_;
+	double scanRangeMax_;
+	uint32_t numPoints_;
+
+	std::string subscribedTopicsMsg_;
 };
 
 }

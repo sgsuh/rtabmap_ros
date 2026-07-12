@@ -47,6 +47,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 #include <sensor_msgs/image_encodings.hpp>
 #include <sensor_msgs/msg/point_field.hpp>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <geometry_msgs/msg/transform.hpp>
 #include <laser_geometry/laser_geometry.hpp>
 #include <rtabmap/core/util3d_surface.h>
@@ -3438,6 +3439,114 @@ bool deskew(
 		const rtabmap::Transform & velocity)
 {
 	return deskew_impl(input, output, "", 0, 0, true, velocity, previousStamp);
+}
+
+bool laserScanToPointCloud (
+		const sensor_msgs::msg::LaserScan& input,
+		sensor_msgs::msg::PointCloud2& output,
+		const bool clockwise_scan)
+{
+	const auto& ranges = input.ranges;
+	const auto& angle_increment = input.angle_increment;
+	const auto& angle_min = input.angle_min;
+	const auto& angle_max = input.angle_max;
+	const auto& time_increment = input.time_increment;
+
+	const double scan_start_time = static_cast<double>(input.header.stamp.sec) + static_cast<double>(input.header.stamp.nanosec) * 1e-9;
+
+	output.header = input.header;
+	output.height = 1;
+	output.width = ranges.size();
+	output.is_dense = false;
+	output.is_bigendian = false;
+
+	sensor_msgs::PointCloud2Modifier modifier(output);
+	modifier.setPointCloud2Fields(4,
+								"x", 1, sensor_msgs::msg::PointField::FLOAT32,
+								"y", 1, sensor_msgs::msg::PointField::FLOAT32,
+								"z", 1, sensor_msgs::msg::PointField::FLOAT32,
+								"t", 1, sensor_msgs::msg::PointField::FLOAT64);
+	modifier.resize(ranges.size());
+
+	sensor_msgs::PointCloud2Iterator<float> iter_x(output, "x");
+	sensor_msgs::PointCloud2Iterator<float> iter_y(output, "y");
+	sensor_msgs::PointCloud2Iterator<float> iter_z(output, "z");
+	sensor_msgs::PointCloud2Iterator<double> iter_time(output, "t");
+
+	if (clockwise_scan) {
+		auto iter_range = ranges.crbegin();
+		for (size_t i = 0; i < ranges.size(); ++i, ++iter_x, ++iter_y, ++iter_z, ++iter_time, ++iter_range) {
+			const float range = *iter_range;
+			const float angle = angle_max - i * angle_increment;
+			if (std::isfinite(range)) {
+				*iter_x = range * std::cos(angle);
+				*iter_y = range * std::sin(angle);
+				*iter_z = 0.0f;
+			} else {
+				*iter_x = std::numeric_limits<float>::quiet_NaN();
+				*iter_y = std::numeric_limits<float>::quiet_NaN();
+				*iter_z = std::numeric_limits<float>::quiet_NaN();;
+			}
+			*iter_time = scan_start_time + static_cast<double>(i) * time_increment;
+		}
+	} else {
+		auto iter_range = ranges.cbegin();
+		for (size_t i = 0; i < ranges.size(); ++i, ++iter_x, ++iter_y, ++iter_z, ++iter_time, ++iter_range) {
+			const float range = *iter_range;
+			const float angle = angle_min + i * angle_increment;
+			if (std::isfinite(range)) {
+				*iter_x = range * std::cos(angle);
+				*iter_y = range * std::sin(angle);
+				*iter_z = 0.0f;
+			} else {
+				*iter_x = std::numeric_limits<float>::quiet_NaN();
+				*iter_y = std::numeric_limits<float>::quiet_NaN();
+				*iter_z = std::numeric_limits<float>::quiet_NaN();;
+			}
+			*iter_time = scan_start_time + static_cast<double>(i) * time_increment;
+		}
+	}
+
+	return true;
+}
+
+void
+transformPointCloudLite (
+		const Eigen::Matrix4f &transform,
+		const sensor_msgs::msg::PointCloud2 &in,
+        sensor_msgs::msg::PointCloud2 &out)
+{
+  // Get X-Y-Z indices
+  int x_idx = pcl::getFieldIndex (in, "x");
+  int y_idx = pcl::getFieldIndex (in, "y");
+  int z_idx = pcl::getFieldIndex (in, "z");
+
+  out.header = in.header;
+  out.height = in.height;
+  out.width  = in.width;
+  out.fields = in.fields;
+  out.is_bigendian = in.is_bigendian;
+  out.point_step   = in.point_step;
+  out.row_step     = in.row_step;
+  out.is_dense     = in.is_dense;
+  out.data.resize (in.data.size ());
+  // Copy everything as it's faster than copying individual elements
+  // memcpy (&out.data[0], &in.data[0], in.data.size ());
+
+  Eigen::Array4i xyz_offset (in.fields[x_idx].offset, in.fields[y_idx].offset, in.fields[z_idx].offset, 0);
+  for (size_t i = 0; i < in.width * in.height; ++i)
+  {
+    Eigen::Vector4f pt (*(float*)&in.data[xyz_offset[0]], *(float*)&in.data[xyz_offset[1]], *(float*)&in.data[xyz_offset[2]], 1);
+
+	const bool invalid = !std::isfinite (pt[0]) || !std::isfinite (pt[1]) || !std::isfinite (pt[2]);
+	Eigen::Vector4f pt_out = invalid ? pt : transform * pt;
+
+    memcpy (&out.data[xyz_offset[0]], &pt_out[0], sizeof (float));
+    memcpy (&out.data[xyz_offset[1]], &pt_out[1], sizeof (float));
+    memcpy (&out.data[xyz_offset[2]], &pt_out[2], sizeof (float));
+
+    xyz_offset += in.point_step;
+  }
 }
 
 

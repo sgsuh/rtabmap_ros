@@ -31,6 +31,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 
+#include <sensor_msgs/point_cloud2_iterator.hpp>
+
 #include <rtabmap_conversions/MsgConversion.h>
 #include <rtabmap/utilite/UConversion.h>
 #include <rtabmap/utilite/ULogger.h>
@@ -50,20 +52,28 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 	exactSync2_(0),
 	approxSync2_(0),
 	waitForTransform_(0.1),
-	xyzOutput_(false)
+	xyzOutput_(false),
+	convertToLaserScan_(false),
+	scanAngleMin_(-M_PI),
+	scanAngleMax_(M_PI),
+	scanAngleIncrement_(0.0174533),
+	scanRangeMin_(0.0),
+	scanRangeMax_(1000.0)
 {
 	tfBuffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
 	//auto timer_interface = std::make_shared<tf2_ros::CreateTimerROS>(
 	//	this->get_node_base_interface(),
 	//	this->get_node_timers_interface());
 	//tfBuffer_->setCreateTimerInterface(timer_interface);
-	tfListener_ = std::make_shared<tf2_ros::TransformListener>(*tfBuffer_);
+	tfListener_ = std::make_shared<tf2_ros::TransformListener>(*tfBuffer_, this);
 
 	int topicQueueSize = 1;
 	int syncQueueSize = 5;
 	int count = 2;
 	bool approx=true;
 	double approxSyncMaxInterval = 0.0;
+	double interMessageLowerBound = 0.0;
+	double agePenalty = 1.0;
 	int qos=RMW_QOS_POLICY_RELIABILITY_SYSTEM_DEFAULT;
 	topicQueueSize = this->declare_parameter("topic_queue_size", topicQueueSize);
 	int queueSize = this->declare_parameter("queue_size", -1);
@@ -81,16 +91,49 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 	fixedFrameId_ = this->declare_parameter("fixed_frame_id", fixedFrameId_);
 	approx = this->declare_parameter("approx_sync", approx);
 	approxSyncMaxInterval = this->declare_parameter("approx_sync_max_interval", approxSyncMaxInterval);
+	interMessageLowerBound = this->declare_parameter("inter_message_lower_bound", interMessageLowerBound);
+	agePenalty = this->declare_parameter("age_penalty", agePenalty);
 	count = this->declare_parameter("count", count);
 	waitForTransform_ = this->declare_parameter("wait_for_transform", waitForTransform_);
 	xyzOutput_ = this->declare_parameter("xyz_output", xyzOutput_);
 
-	cloudPub_ = create_publisher<sensor_msgs::msg::PointCloud2>("combined_cloud", rclcpp::QoS(1).reliability((rmw_qos_reliability_policy_t)qos));
+	convertToLaserScan_ = this->declare_parameter("2d_output", convertToLaserScan_);
+	scanAngleMin_ = this->declare_parameter("scan_angle_min", scanAngleMin_);
+	scanAngleMax_ = this->declare_parameter("scan_angle_max", scanAngleMax_);
+	if (scanAngleMin_ >= scanAngleMax_) {
+		RCLCPP_WARN(this->get_logger(), "scan_angle_min(%f) must be smaller than scan_angle_max(%f). Swapping the values.", scanAngleMin_, scanAngleMax_);
+		std::swap(scanAngleMin_, scanAngleMax_);
+	}
+	scanAngleIncrement_ = this->declare_parameter("scan_angle_increment", scanAngleIncrement_);
+	if (scanAngleIncrement_ < 0.0001) {
+		RCLCPP_WARN(this->get_logger(), "scan_angle_increment(%f) must be larger than 0. Setting it to 0.0174533(1 degrees).", scanAngleIncrement_);
+		scanAngleIncrement_ = 0.0174533;
+	}
+	scanRangeMin_ = this->declare_parameter("scan_range_min", scanRangeMin_);
+	scanRangeMax_ = this->declare_parameter("scan_range_max", scanRangeMax_);
+	if (scanRangeMin_ <= 0 or scanRangeMax_ <= 0) {
+		RCLCPP_WARN(this->get_logger(), "scan_range_min(%f) and scan_range_max(%f) must be larger than 0.0. Swapping signs.", scanRangeMin_, scanRangeMax_);
+		scanRangeMin_ = std::abs(scanRangeMin_);
+		scanRangeMax_ = std::abs(scanRangeMax_);
+	}
+	if (scanRangeMin_ >= scanRangeMax_) {
+		RCLCPP_WARN(this->get_logger(), "scan_range_min(%f) must be smaller than scan_range_max(%f). Swapping the values.", scanRangeMin_, scanRangeMax_);
+		std::swap(scanRangeMin_, scanRangeMax_);
+	}
+	numPoints_ = std::ceil((scanAngleMax_ - scanAngleMin_) / scanAngleIncrement_);
+	if (numPoints_ < 50) {
+		RCLCPP_WARN(this->get_logger(), "Number of points in combined LaserScan message is too small(%d). Recommended is at least 200. Check your parameters.", numPoints_);
+	}
+
+	if (convertToLaserScan_) {
+		scanPub_ = create_publisher<sensor_msgs::msg::LaserScan>("combined_scan", rclcpp::QoS(1).reliability((rmw_qos_reliability_policy_t)qos));
+	} else {
+		cloudPub_ = create_publisher<sensor_msgs::msg::PointCloud2>("combined_cloud", rclcpp::QoS(1).reliability((rmw_qos_reliability_policy_t)qos));
+	}
 
 	cloudSub_1_.subscribe(this, "cloud1", RCLCPP_QOS(topicQueueSize, qos));
 	cloudSub_2_.subscribe(this, "cloud2", RCLCPP_QOS(topicQueueSize, qos));
 
-	std::string subscribedTopicsMsg;
 	if(count == 4)
 	{
 		cloudSub_3_.subscribe(this, "cloud3", RCLCPP_QOS(topicQueueSize, qos));
@@ -100,6 +143,15 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 			approxSync4_ = new message_filters::Synchronizer<ApproxSync4Policy>(ApproxSync4Policy(syncQueueSize), cloudSub_1_, cloudSub_2_, cloudSub_3_, cloudSub_4_);
 			if(approxSyncMaxInterval > 0.0)
 				approxSync4_->setMaxIntervalDuration(rclcpp::Duration::from_seconds(approxSyncMaxInterval));
+			if(agePenalty > 0.0)
+				approxSync4_->setAgePenalty(agePenalty);
+			if(interMessageLowerBound > 0.0)
+			{
+				approxSync4_->setInterMessageLowerBound(0, rclcpp::Duration::from_seconds(interMessageLowerBound));
+				approxSync4_->setInterMessageLowerBound(1, rclcpp::Duration::from_seconds(interMessageLowerBound));
+				approxSync4_->setInterMessageLowerBound(2, rclcpp::Duration::from_seconds(interMessageLowerBound));
+				approxSync4_->setInterMessageLowerBound(3, rclcpp::Duration::from_seconds(interMessageLowerBound));
+			}
 			approxSync4_->registerCallback(std::bind(&rtabmap_util::PointCloudAggregator::clouds4_callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4));
 		}
 		else
@@ -107,7 +159,7 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 			exactSync4_ = new message_filters::Synchronizer<ExactSync4Policy>(ExactSync4Policy(syncQueueSize), cloudSub_1_, cloudSub_2_, cloudSub_3_, cloudSub_4_);
 			exactSync4_->registerCallback(std::bind(&rtabmap_util::PointCloudAggregator::clouds4_callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4));
 		}
-		subscribedTopicsMsg = uFormat("\n%s subscribed to (%s sync%s):\n   %s,\n   %s,\n   %s,\n   %s",
+		subscribedTopicsMsg_ = uFormat("\n%s subscribed to (%s sync%s):\n   %s,\n   %s,\n   %s,\n   %s",
 				get_name(),
 				approx?"approx":"exact",
 				approx&&approxSyncMaxInterval!=0.0?uFormat(", max interval=%fs", approxSyncMaxInterval).c_str():"",
@@ -124,6 +176,14 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 			approxSync3_ = new message_filters::Synchronizer<ApproxSync3Policy>(ApproxSync3Policy(syncQueueSize), cloudSub_1_, cloudSub_2_, cloudSub_3_);
 			if(approxSyncMaxInterval > 0.0)
 				approxSync3_->setMaxIntervalDuration(rclcpp::Duration::from_seconds(approxSyncMaxInterval));
+			if(agePenalty > 0.0)
+				approxSync3_->setAgePenalty(agePenalty);
+			if(interMessageLowerBound > 0.0)
+			{
+				approxSync3_->setInterMessageLowerBound(0, rclcpp::Duration::from_seconds(interMessageLowerBound));
+				approxSync3_->setInterMessageLowerBound(1, rclcpp::Duration::from_seconds(interMessageLowerBound));
+				approxSync3_->setInterMessageLowerBound(2, rclcpp::Duration::from_seconds(interMessageLowerBound));
+			}
 			approxSync3_->registerCallback(std::bind(&rtabmap_util::PointCloudAggregator::clouds3_callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
 		}
 		else
@@ -131,7 +191,7 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 			exactSync3_ = new message_filters::Synchronizer<ExactSync3Policy>(ExactSync3Policy(syncQueueSize), cloudSub_1_, cloudSub_2_, cloudSub_3_);
 			exactSync3_->registerCallback(std::bind(&rtabmap_util::PointCloudAggregator::clouds3_callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
 		}
-		subscribedTopicsMsg = uFormat("\n%s subscribed to (%s sync%s):\n   %s,\n   %s,\n   %s",
+		subscribedTopicsMsg_ = uFormat("\n%s subscribed to (%s sync%s):\n   %s,\n   %s,\n   %s",
 				this->get_name(),
 				approx?"approx":"exact",
 				approx&&approxSyncMaxInterval!=0.0?uFormat(", max interval=%fs", approxSyncMaxInterval).c_str():"",
@@ -146,6 +206,13 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 			approxSync2_ = new message_filters::Synchronizer<ApproxSync2Policy>(ApproxSync2Policy(syncQueueSize), cloudSub_1_, cloudSub_2_);
 			if(approxSyncMaxInterval > 0.0)
 				approxSync2_->setMaxIntervalDuration(rclcpp::Duration::from_seconds(approxSyncMaxInterval));
+			if(agePenalty > 0.0)
+				approxSync2_->setAgePenalty(agePenalty);
+			if(interMessageLowerBound > 0.0)
+			{
+				approxSync2_->setInterMessageLowerBound(0, rclcpp::Duration::from_seconds(interMessageLowerBound));
+				approxSync2_->setInterMessageLowerBound(1, rclcpp::Duration::from_seconds(interMessageLowerBound));
+			}
 			approxSync2_->registerCallback(std::bind(&rtabmap_util::PointCloudAggregator::clouds2_callback, this, std::placeholders::_1, std::placeholders::_2));
 		}
 		else
@@ -153,7 +220,7 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 			exactSync2_ = new message_filters::Synchronizer<ExactSync2Policy>(ExactSync2Policy(syncQueueSize), cloudSub_1_, cloudSub_2_);
 			exactSync2_->registerCallback(std::bind(&rtabmap_util::PointCloudAggregator::clouds2_callback, this, std::placeholders::_1, std::placeholders::_2));
 		}
-		subscribedTopicsMsg = uFormat("\n%s subscribed to (%s sync%s):\n   %s,\n   %s",
+		subscribedTopicsMsg_ = uFormat("\n%s subscribed to (%s sync%s):\n   %s,\n   %s",
 				this->get_name(),
 				approx?"approx":"exact",
 				approx&&approxSyncMaxInterval!=0.0?uFormat(", max interval=%fs", approxSyncMaxInterval).c_str():"",
@@ -175,11 +242,11 @@ PointCloudAggregator::PointCloudAggregator(const rclcpp::NodeOptions & options) 
 						this->get_name(),
 						approx?"":"Parameter \"approx_sync\" is false, which means that input "
 							"topics should have all the exact timestamp for the callback to be called.",
-						subscribedTopicsMsg.c_str());
+						subscribedTopicsMsg_.c_str());
 			}
 		}
 	});
-	RCLCPP_INFO(this->get_logger(), "%s", subscribedTopicsMsg.c_str());
+	RCLCPP_INFO(this->get_logger(), "%s", subscribedTopicsMsg_.c_str());
 }
 
 PointCloudAggregator::~PointCloudAggregator()
@@ -232,53 +299,87 @@ void PointCloudAggregator::clouds2_callback(const sensor_msgs::msg::PointCloud2:
 
 	combineClouds(clouds);
 }
-void PointCloudAggregator::combineClouds(const std::vector<sensor_msgs::msg::PointCloud2::ConstSharedPtr> & cloudMsgs)
-{
+void PointCloudAggregator::combineClouds(const std::vector<sensor_msgs::msg::PointCloud2::ConstSharedPtr> & cloudMsgs) {
 	callbackCalled_ = true;
-	UASSERT(cloudMsgs.size() > 1);
-	if(cloudPub_->get_subscription_count())
-	{
-		pcl::PCLPointCloud2::Ptr output(new pcl::PCLPointCloud2);
 
-		std::string frameId = frameId_;
-		if(!frameId.empty() && frameId.compare(cloudMsgs[0]->header.frame_id) != 0)
-		{
-			sensor_msgs::msg::PointCloud2 tmp;
-			rtabmap::Transform t = rtabmap_conversions::getTransform(frameId, cloudMsgs[0]->header.frame_id, cloudMsgs[0]->header.stamp, *tfBuffer_, waitForTransform_);
-			if(t.isNull())
-			{
-				return;
+	// pass if there are no subscribers
+	if (!(convertToLaserScan_ ? scanPub_->get_subscription_count() : cloudPub_->get_subscription_count())) {
+		return;
+	}
+
+	// select latest stamp: this will be the common temporal frame
+	rclcpp::Time latest_stamp = cloudMsgs.front()->header.stamp;
+	uint8_t latest_stamp_idx = 0;
+	for (uint8_t i = 1; i < cloudMsgs.size(); ++i) {
+		const rclcpp::Time this_stamp = cloudMsgs.at(i)->header.stamp;
+		if (this_stamp > latest_stamp) {
+			latest_stamp_idx = i;
+			latest_stamp = this_stamp;
+		}
+	}
+
+	const auto& base_frame = frameId_;
+
+	pcl::PCLPointCloud2::Ptr output_cloud(new pcl::PCLPointCloud2);
+	for (uint8_t i = 0; i < cloudMsgs.size(); ++i) {
+		const auto& cloud = cloudMsgs.at(i);
+
+		// spatial transform from sensor frame to base frame (static tf, commonly sensor->base_link. This should be always available)
+		const rtabmap::Transform static_t = rtabmap_conversions::getTransform(base_frame, cloud->header.frame_id, cloud->header.stamp, *tfBuffer_, waitForTransform_);
+		if (static_t.isNull()) {
+			RCLCPP_ERROR(this->get_logger(), "Failed to get static transform during point cloud aggregation!");
+			return;
+		}
+		// spatiotemporal transform from base frame to unified frame(at the timestamp of latest cloud)
+		rtabmap::Transform spatiotemporal_t;
+		spatiotemporal_t.setIdentity();
+		if (i != latest_stamp_idx) {
+			spatiotemporal_t = rtabmap_conversions::getMovingTransform(
+				base_frame,
+				fixedFrameId_,
+				latest_stamp,
+				cloud->header.stamp,
+				*tfBuffer_,
+				waitForTransform_);
+			if (spatiotemporal_t.isNull()) {
+				RCLCPP_WARN(this->get_logger(), "Failed to get moving transform during point cloud aggregation! Ignoring temporal shift...");
+				spatiotemporal_t.setIdentity();
 			}
-			rtabmap_conversions::transformPointCloud(t.toEigen4f(), *cloudMsgs[0], tmp);
-			pcl_conversions::toPCL(tmp, *output);
 		}
-		else
-		{
-			pcl_conversions::toPCL(*cloudMsgs[0], *output);
-			frameId = cloudMsgs[0]->header.frame_id;
+		// combine transforms to shift this cloud to common spatiotemporal frame
+		const Eigen::Matrix4f combined_t = spatiotemporal_t.toEigen4f() * static_t.toEigen4f();
+		sensor_msgs::msg::PointCloud2 tmp;
+		rtabmap_conversions::transformPointCloudLite(combined_t, *cloud, tmp);
+		// convert to PCL pointcloud2
+		pcl::PCLPointCloud2::Ptr tmp_cloud(new pcl::PCLPointCloud2);
+		pcl_conversions::toPCL(tmp, *tmp_cloud);
+
+		// remove invalid pts
+		if (!tmp_cloud->is_dense) {
+			tmp_cloud = rtabmap::util3d::removeNaNFromPointCloud(tmp_cloud);
 		}
 
-		if(xyzOutput_ && !output->data.empty())
-		{
+		// strip fields other than xyz if xyzOutput_ is true
+		if (xyzOutput_ and !tmp_cloud->data.empty()) {
 			// convert only if not already XYZ cloud
 			bool hasField[4] = {false};
-			for(size_t i=0; i<output->fields.size(); ++i)
+			for(uint8_t i = 0; i < tmp_cloud->fields.size(); ++i)
 			{
-				if(output->fields[i].name.compare("x") == 0)
+				if(tmp_cloud->fields[i].name.compare("x") == 0)
 				{
 					hasField[0] = true;
 				}
-				else if(output->fields[i].name.compare("y") == 0)
+				else if(tmp_cloud->fields[i].name.compare("y") == 0)
 				{
 					hasField[1] = true;
 				}
-				else if(output->fields[i].name.compare("z") == 0)
+				else if(tmp_cloud->fields[i].name.compare("z") == 0)
 				{
 					hasField[2] = true;
 				}
 				else
 				{
-					hasField[3] = true; // other
+					hasField[3] = true; // others (intensity, timestamp...)
 					break;
 				}
 			}
@@ -289,135 +390,71 @@ void PointCloudAggregator::combineClouds(const std::vector<sensor_msgs::msg::Poi
 			else
 			{
 				pcl::PointCloud<pcl::PointXYZ> cloudxyz;
-				pcl::fromPCLPointCloud2(*output, cloudxyz);
-				pcl::toPCLPointCloud2(cloudxyz, *output);
+				pcl::fromPCLPointCloud2(*tmp_cloud, cloudxyz);
+				pcl::toPCLPointCloud2(cloudxyz, *tmp_cloud);
 			}
 		}
 
-		for(unsigned int i=1; i<cloudMsgs.size(); ++i)
-		{
-			rtabmap::Transform cloudDisplacement;
-			if(!fixedFrameId_.empty() &&
-			   cloudMsgs[0]->header.stamp != cloudMsgs[i]->header.stamp)
-			{
-				// approx sync
-				cloudDisplacement = rtabmap_conversions::getMovingTransform(
-						frameId, //sourceTargetFrame
-						fixedFrameId_, //fixedFrame
-						cloudMsgs[0]->header.stamp, //stampTarget
-						cloudMsgs[i]->header.stamp, //stampSource
-						*tfBuffer_,
-						waitForTransform_);
+		if (output_cloud->data.empty()) {
+			output_cloud = tmp_cloud; // pointers
+		} else if (!tmp_cloud->data.empty()) {
+			if (output_cloud->fields.size() != tmp_cloud->fields.size()) {
+				RCLCPP_WARN_ONCE(this->get_logger(), "Detected different fields for input clouds during point cloud aggregation! Please check formats...");
 			}
-
-			pcl::PCLPointCloud2::Ptr cloud2(new pcl::PCLPointCloud2);
-			if(frameId.compare(cloudMsgs[i]->header.frame_id) != 0)
-			{
-				sensor_msgs::msg::PointCloud2 tmp;
-				rtabmap::Transform t = rtabmap_conversions::getTransform(frameId, cloudMsgs[i]->header.frame_id, cloudMsgs[i]->header.stamp, *tfBuffer_, waitForTransform_);
-				rtabmap_conversions::transformPointCloud(t.toEigen4f(), *cloudMsgs[i], tmp);
-				if(!cloudDisplacement.isNull())
-				{
-					sensor_msgs::msg::PointCloud2 tmp2;
-					rtabmap_conversions::transformPointCloud(cloudDisplacement.toEigen4f(), tmp, tmp2);
-					pcl_conversions::toPCL(tmp2, *cloud2);
-				}
-				else
-				{
-					pcl_conversions::toPCL(tmp, *cloud2);
-				}
-			}
-			else
-			{
-				if(!cloudDisplacement.isNull())
-				{
-					sensor_msgs::msg::PointCloud2 tmp;
-					rtabmap_conversions::transformPointCloud(cloudDisplacement.toEigen4f(), *cloudMsgs[i], tmp);
-					pcl_conversions::toPCL(tmp, *cloud2);
-				}
-				else
-				{
-					pcl_conversions::toPCL(*cloudMsgs[i], *cloud2);
-				}
-			}
-
-			if(!cloud2->is_dense)
-			{
-				// remove nans
-				cloud2 = rtabmap::util3d::removeNaNFromPointCloud(cloud2);
-			}
-
-			if(xyzOutput_ && !cloud2->data.empty())
-			{
-				// convert only if not already XYZ cloud
-				bool hasField[4] = {false};
-				for(size_t i=0; i<cloud2->fields.size(); ++i)
-				{
-					if(cloud2->fields[i].name.compare("x") == 0)
-					{
-						hasField[0] = true;
-					}
-					else if(cloud2->fields[i].name.compare("y") == 0)
-					{
-						hasField[1] = true;
-					}
-					else if(cloud2->fields[i].name.compare("z") == 0)
-					{
-						hasField[2] = true;
-					}
-					else
-					{
-						hasField[3] = true; // other
-						break;
-					}
-				}
-				if(hasField[0] && hasField[1] && hasField[2] && !hasField[3])
-				{
-					// do nothing, already XYZ
-				}
-				else
-				{
-					pcl::PointCloud<pcl::PointXYZ> cloudxyz;
-					pcl::fromPCLPointCloud2(*cloud2, cloudxyz);
-					pcl::toPCLPointCloud2(cloudxyz, *cloud2);
-				}
-			}
-
-			if(output->data.empty())
-			{
-				output = cloud2;
-			}
-			else if(!cloud2->data.empty())
-			{
-
-				if(output->fields.size() != cloud2->fields.size())
-				{
-					RCLCPP_WARN(this->get_logger(), "%s: Input topics don't have all the "
-							"same number of fields (cloud1=%d, cloud%d=%d), concatenation "
-							"may fails. You can enable \"xyz_output\" option "
-							"to convert all inputs to XYZ.",
-							get_name(),
-							(int)output->fields.size(),
-							i+1,
-							(int)output->fields.size());
-				}
-
-				pcl::PCLPointCloud2::Ptr tmp_output(new pcl::PCLPointCloud2);
+			pcl::PCLPointCloud2::Ptr tmp_output_cloud(new pcl::PCLPointCloud2);
 #if PCL_VERSION_COMPARE(>=, 1, 10, 0)
-				pcl::concatenate(*output, *cloud2, *tmp_output);
+			pcl::concatenate(*output_cloud, *tmp_cloud, *tmp_output_cloud);
 #else
-				pcl::concatenatePointCloud(*output, *cloud2, *tmp_output);
+			pcl::concatenatePointCloud(*output_cloud, *tmp_cloud, *tmp_output_cloud);
 #endif
-				//Make sure row_step is the sum of both
-				tmp_output->row_step = tmp_output->width * tmp_output->point_step;
-				output = tmp_output;
+			tmp_output_cloud->row_step = tmp_output_cloud->width * tmp_output_cloud->point_step;
+			output_cloud = tmp_output_cloud; // pointers
+		} else {
+			// RCLCPP_ERROR(this->get_logger(), "Something went wrong while concatenation...");
+		}
+
+	}
+
+	// convert back to ROS cloud
+	sensor_msgs::msg::PointCloud2::UniquePtr rosCloud(new sensor_msgs::msg::PointCloud2);
+	pcl_conversions::moveFromPCL(*output_cloud, *rosCloud);
+	rosCloud->header.stamp = latest_stamp;
+	rosCloud->header.frame_id = base_frame;
+
+	// convert pointcloud2 to laserscan, inspired by the pointcloud_to_laserscan package
+	if (convertToLaserScan_) {
+		sensor_msgs::msg::LaserScan::UniquePtr scanMsg(new sensor_msgs::msg::LaserScan);
+		scanMsg->header = rosCloud->header;
+		scanMsg->angle_min = scanAngleMin_;
+		scanMsg->angle_max = scanAngleMax_;
+		scanMsg->angle_increment = scanAngleIncrement_;
+		scanMsg->time_increment = 0.0;
+		scanMsg->scan_time = 0.0;
+		scanMsg->range_min = scanRangeMin_;
+		scanMsg->range_max = scanRangeMax_;
+		scanMsg->ranges.assign(numPoints_, 0.0);
+
+		sensor_msgs::PointCloud2ConstIterator<float> iterX(*rosCloud, "x");
+		sensor_msgs::PointCloud2ConstIterator<float> iterY(*rosCloud, "y");
+		// sensor_msgs::PointCloud2ConstIterator<float> iterZ(*rosCloud, "z");
+		for (; iterX != iterX.end(); ++iterX, ++iterY/*, ++iterZ*/) {
+			const float x = *iterX;
+			const float y = *iterY;
+			// const float z = *iterZ;
+			const double range = std::hypot(x, y);
+			if (range >= scanRangeMin_ and range <= scanRangeMax_) {
+				const double angle = std::atan2(y, x);
+				if (angle >= scanAngleMin_ and angle <= scanAngleMax_) {
+					const uint32_t idx = (angle - scanAngleMin_) / scanAngleIncrement_;
+					if (idx < numPoints_ and (range < scanMsg->ranges[idx] or scanMsg->ranges[idx] < 0.01)) {
+						scanMsg->ranges[idx] = range;
+					}
+				}
 			}
 		}
 
-		sensor_msgs::msg::PointCloud2::UniquePtr rosCloud(new sensor_msgs::msg::PointCloud2);
-		pcl_conversions::moveFromPCL(*output, *rosCloud);
-		rosCloud->header.stamp = cloudMsgs[0]->header.stamp;
-		rosCloud->header.frame_id = frameId;
+		scanPub_->publish(std::move(scanMsg));
+	} else {
 		cloudPub_->publish(std::move(rosCloud));
 	}
 }

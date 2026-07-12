@@ -300,6 +300,16 @@ bool deskew(
 		double previousStamp,
 		const rtabmap::Transform & velocity);
 
+bool laserScanToPointCloud (
+		const sensor_msgs::msg::LaserScan& input,
+		sensor_msgs::msg::PointCloud2& output,
+		const bool clockwise_scan = false
+);
+void transformPointCloudLite (
+		const Eigen::Matrix4f &transform,
+		const sensor_msgs::msg::PointCloud2 &in,
+		sensor_msgs::msg::PointCloud2 &out);
+
 // Missing function in ros2 (from old pcl_ros)
 void transformPointCloud (
 		const Eigen::Matrix4f &transform,
