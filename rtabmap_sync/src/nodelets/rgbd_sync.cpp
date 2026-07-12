@@ -51,6 +51,7 @@ RGBDSync::RGBDSync(const rclcpp::NodeOptions & options) :
 	decimation_(1),
 	compressedRate_(0),
 	approxSyncMaxInterval_(0.0),
+	approxSyncInterMessageLowerBound_(0.1),
 	approxSyncDepth_(0),
 	exactSyncDepth_(0)
 {
@@ -60,6 +61,7 @@ RGBDSync::RGBDSync(const rclcpp::NodeOptions & options) :
 	int qos = RMW_QOS_POLICY_RELIABILITY_SYSTEM_DEFAULT;
 	approxSync = this->declare_parameter("approx_sync", approxSync);
 	approxSyncMaxInterval_ = this->declare_parameter("approx_sync_max_interval", approxSyncMaxInterval_);
+	approxSyncInterMessageLowerBound_ = this->declare_parameter("approx_sync_inter_message_lower_bound", approxSyncInterMessageLowerBound_);
 	topicQueueSize = this->declare_parameter("topic_queue_size", topicQueueSize);
 	int queueSize = this->declare_parameter("queue_size", -1);
 	if(queueSize != -1)
@@ -99,8 +101,10 @@ RGBDSync::RGBDSync(const rclcpp::NodeOptions & options) :
 	}
 
 	RCLCPP_INFO(this->get_logger(), "%s: approx_sync = %s", get_name(), approxSync?"true":"false");
-	if(approxSync)
+	if(approxSync) {
 		RCLCPP_INFO(this->get_logger(), "%s: approx_sync_max_interval = %f", get_name(), approxSyncMaxInterval_);
+		RCLCPP_INFO(this->get_logger(), "%s: approx_sync_inter_message_lower_bound = %f", get_name(), approxSyncInterMessageLowerBound_);
+	}
 	RCLCPP_INFO(this->get_logger(), "%s: topic_queue_size  = %d", get_name(), topicQueueSize);
 	RCLCPP_INFO(this->get_logger(), "%s: sync_queue_size  = %d", get_name(), syncQueueSize);
 	RCLCPP_INFO(this->get_logger(), "%s: qos             = %d", get_name(), qos);
@@ -119,6 +123,9 @@ RGBDSync::RGBDSync(const rclcpp::NodeOptions & options) :
 		approxSyncDepth_ = new message_filters::Synchronizer<MyApproxSyncDepthPolicy>(MyApproxSyncDepthPolicy(syncQueueSize), imageSub_, imageDepthSub_, cameraInfoSub_);
 		if(approxSyncMaxInterval_ > 0.0)
 			approxSyncDepth_->setMaxIntervalDuration(rclcpp::Duration::from_seconds(approxSyncMaxInterval_));
+		approxSyncDepth_->setInterMessageLowerBound(0, rclcpp::Duration::from_seconds(approxSyncInterMessageLowerBound_));
+		approxSyncDepth_->setInterMessageLowerBound(1, rclcpp::Duration::from_seconds(approxSyncInterMessageLowerBound_));
+		approxSyncDepth_->setInterMessageLowerBound(2, rclcpp::Duration::from_seconds(approxSyncInterMessageLowerBound_));
 		approxSyncDepth_->registerCallback(std::bind(&RGBDSync::callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
 	}
 	else

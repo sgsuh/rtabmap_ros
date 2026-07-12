@@ -62,6 +62,7 @@ private:
 	int decimation_;
 	double compressedRate_;
 	double approxSyncMaxInterval_;
+	double approxSyncInterMessageLowerBound_;
 
 	rclcpp::Time lastCompressedPublished_;
 
