@@ -34,6 +34,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <tf2_ros/transform_listener.hpp>
 
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 
 namespace rtabmap_util
@@ -58,6 +59,7 @@ private:
 	std::string fixedFrameId_;
 	double waitForTransformDuration_;
 	bool slerp_;
+	bool clockwiseScan_;
 	std::shared_ptr<tf2_ros::Buffer> tfBuffer_;
 	std::shared_ptr<tf2_ros::TransformListener> tfListener_;
 	std::unique_ptr<rtabmap_sync::SyncDiagnostic> scanSyncDiagnostic_;
